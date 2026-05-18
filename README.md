@@ -6,4 +6,4 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| [deepwiki.ts](./deepwiki.ts) | Cloudflare Worker 中使用的 DeepWiki 问答代理逻辑，用于代发请求并返回结果页链接。 |
+| [deepwiki.ts](./deepwiki.ts) |  DeepWiki 问答代理后端参考的逻辑，用于代发请求并返回结果页链接。 |
