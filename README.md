@@ -6,4 +6,4 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| [deepwiki.ts](./deepwiki.ts) |  DeepWiki 问答代理后端参考的逻辑，用于代发请求并返回结果页链接。 |
+| [bead_engine_optimized.py](./bead_engine_optimized.py) | 将图片转换为多种拼豆候选图，支持外部品牌色板、结果排序和用量统计。 |
