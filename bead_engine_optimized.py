@@ -67,6 +67,7 @@ class BeadResult:
 
 
 def srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
+    """移除 sRGB 伽马，避免直接平均 RGB 时让降采样结果偏暗。"""
     rgb = np.asarray(rgb, dtype=np.float32)
     return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
 
@@ -77,7 +78,7 @@ def linear_to_srgb(rgb: np.ndarray) -> np.ndarray:
 
 
 def srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
-    """Convert sRGB in [0, 1] to OKLab."""
+    """将 [0, 1] 范围的 sRGB 转为更适合计算感知色差的 OKLab。"""
     linear = srgb_to_linear(rgb)
     l = (
         0.4122214708 * linear[..., 0]
@@ -114,7 +115,7 @@ def _resize_float_channel(
 
 
 def area_sample_linear(image: Image.Image, rows: int, cols: int) -> np.ndarray:
-    """Area sample in linear light, avoiding gamma-darkened cell averages."""
+    """在线性光空间做面积采样，让每个输出像素对应一颗拼豆。"""
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
     linear = srgb_to_linear(rgb)
     downsampling = image.width > cols or image.height > rows
@@ -134,6 +135,7 @@ def _gradient_magnitude(lightness: np.ndarray) -> np.ndarray:
 
 
 def importance_weights(oklab: np.ndarray, edge_weight: float = 1.0) -> np.ndarray:
+    # 边缘和高彩度区域通常承载眼睛、文字、轮廓等关键信息，应优先占用色板名额。
     gradient = _gradient_magnitude(oklab[..., 0])
     gradient /= max(float(np.percentile(gradient, 95)), 1e-6)
     gradient = np.clip(gradient, 0.0, 1.0)
@@ -206,7 +208,7 @@ def _weighted_kmeans(
     restarts: int = 4,
     max_iter: int = 40,
 ) -> np.ndarray:
-    """Small deterministic weighted KMeans used only to find medoid seeds."""
+    """小规模确定性加权 KMeans，仅用于寻找候选色中心。"""
     points = np.asarray(points, dtype=np.float64)
     weights = np.asarray(weights, dtype=np.float64)
     rng = np.random.default_rng(seed)
@@ -214,6 +216,7 @@ def _weighted_kmeans(
     best_loss = math.inf
 
     for _ in range(restarts):
+        # 使用加权 KMeans++ 初始化，降低小面积关键颜色被忽略的概率。
         centers = [points[int(rng.choice(len(points), p=weights / weights.sum()))]]
         nearest = np.sum((points - centers[0]) ** 2, axis=1)
         while len(centers) < clusters:
@@ -280,6 +283,7 @@ def derive_observed_palette(
         centers = _weighted_kmeans(flat_oklab, flat_weights, max_colors)
         chosen_indices: list[int] = []
         chosen_colors: set[tuple[int, int, int]] = set()
+        # 聚类中心可能是不存在于原图中的虚构颜色，因此吸附到实际观察色上。
         for center in centers:
             distances = np.sum((flat_oklab - center) ** 2, axis=1)
             for index in np.argsort(distances):
@@ -333,6 +337,7 @@ def select_catalog_subset(
     flat_weights = weights.reshape(-1)
     costs = np.sum((points[:, None, :] - catalog_oklab[None, :, :]) ** 2, axis=2)
 
+    # 从真实品牌色表中贪心选择能最大幅度降低总体色差的颜色子集。
     weighted_totals = np.sum(costs * flat_weights[:, None], axis=0)
     selected = [int(np.argmin(weighted_totals))]
     nearest = costs[:, selected[0]].copy()
@@ -368,6 +373,7 @@ def crop_to_ratio(
 
 
 def saliency_center(image: Image.Image) -> tuple[float, float]:
+    # 用亮度梯度和彩度估计主体中心；它只是稳健兜底，不替代用户手动构图。
     preview = image.copy()
     preview.thumbnail((256, 256), Image.Resampling.LANCZOS)
     array = np.asarray(preview.convert("RGB"), dtype=np.float32) / 255.0
@@ -382,7 +388,7 @@ def saliency_center(image: Image.Image) -> tuple[float, float]:
     yy, xx = np.indices(saliency.shape)
     cx = float(np.sum(xx * saliency) / saliency.sum()) * image.width / preview.width
     cy = float(np.sum(yy * saliency) / saliency.sum()) * image.height / preview.height
-    # Saliency may be dominated by one edge; blend with center for stable crops.
+    # 单条强边缘可能拉偏显著性中心，因此与几何中心混合以稳定裁剪。
     return 0.65 * cx + 0.35 * image.width / 2, 0.65 * cy + 0.35 * image.height / 2
 
 
@@ -413,6 +419,7 @@ def prepare_image(
     crop: str,
     background: tuple[int, int, int],
 ) -> Image.Image:
+    # 先修正 EXIF 方向，再把透明区域合成到用户指定背景，避免透明像素变黑。
     opened = ImageOps.exif_transpose(Image.open(image_path)).convert("RGBA")
     backdrop = Image.new("RGBA", opened.size, background + (255,))
     image = Image.alpha_composite(backdrop, opened).convert("RGB")
@@ -457,6 +464,7 @@ def _cell_samples(
 def representative_grid(
     image: Image.Image, rows: int, cols: int, mode: str
 ) -> np.ndarray:
+    # photo/dither 使用综合色；illustration/edge 还会分析每颗豆覆盖区域内的子采样点。
     photo = area_sample_linear(image, rows, cols)
     if mode in {"photo", "dither"}:
         return photo
@@ -469,8 +477,10 @@ def representative_grid(
         ..., 0, :
     ]
     if mode == "illustration":
+        # 选实际出现过的代表色，减少轮廓交界处产生并不存在的混合脏色。
         return medoid.astype(np.uint8)
 
+    # edge 只在单元内部差异明显时改用代表色，平坦区域仍保留面积平均的渐变。
     variance = np.mean(np.sum((sample_oklab - mean) ** 2, axis=-1), axis=2)
     threshold = max(float(np.percentile(variance, 65)), 2.5e-4)
     edge_cells = variance >= threshold
@@ -506,6 +516,7 @@ def spatial_refine(
     rows, cols = labels.shape
     current = labels.copy()
 
+    # 相邻原图颜色接近时鼓励使用同色；跨越强边缘时自动降低平滑约束。
     for _ in range(passes):
         previous = current.copy()
         for row in range(rows):
@@ -538,6 +549,7 @@ def dither_assign(
     rows, cols = work.shape[:2]
     labels = np.zeros((rows, cols), dtype=np.int32)
 
+    # 蛇形 Floyd-Steinberg 扩散可避免误差长期偏向同一侧。
     for row in range(rows):
         left_to_right = row % 2 == 0
         columns = range(cols) if left_to_right else range(cols - 1, -1, -1)
@@ -576,6 +588,7 @@ def _box_blur(array: np.ndarray) -> np.ndarray:
 def result_metrics(
     reference_rgb: np.ndarray, grid: np.ndarray, labels: np.ndarray
 ) -> dict[str, float | int]:
+    # 综合单豆色差、远观色差、轮廓误差和孤立豆比例；分数只用于候选初排。
     reference_oklab = srgb_to_oklab(reference_rgb.astype(np.float32) / 255.0)
     result_oklab = srgb_to_oklab(grid.astype(np.float32) / 255.0)
     error = np.linalg.norm(reference_oklab - result_oklab, axis=2)
@@ -688,6 +701,8 @@ def candidate_sheet(results: Sequence[BeadResult], cell: int) -> Image.Image:
 
 
 class BeadEngineOptimized:
+    """生成多种拼豆候选，并按统一指标排序。"""
+
     def __init__(self, catalog: Sequence[PaletteEntry] | None = None, seed: int = 0):
         self.catalog = list(catalog) if catalog else None
         self.seed = seed
@@ -714,6 +729,7 @@ class BeadEngineOptimized:
             raise ValueError("At least one mode is required")
 
         prepared = prepare_image(image_path, rows, cols, crop, background)
+        # 所有模式共用 photo 采样结果作为评分基准，确保候选之间可比较。
         reference = representative_grid(prepared, rows, cols, "photo")
         results: list[BeadResult] = []
 
@@ -723,10 +739,12 @@ class BeadEngineOptimized:
             edge_weight = 1.5 if mode in {"illustration", "edge"} else 0.7
             weights = importance_weights(target_oklab, edge_weight=edge_weight)
             if self.catalog:
+                # 有品牌色表时只能在真实可购买的颜色中选择。
                 palette = select_catalog_subset(
                     self.catalog, target_oklab, weights, max_colors
                 )
             else:
+                # 未提供品牌色表时生成图像内预览色板，不应直接当作实体色号。
                 palette = derive_observed_palette(target, weights, max_colors)
 
             if mode == "dither":
